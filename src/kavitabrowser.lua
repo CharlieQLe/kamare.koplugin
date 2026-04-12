@@ -10,6 +10,9 @@ local UIManager = require("ui/uimanager")
 local ffiUtil = require("ffi/util")
 local logger = require("logger")
 local KamareImageViewer = require("kamareimageviewer")
+local util = require("util")
+local Device = require("device")
+local ltn12 = require("ltn12")
 local _ = require("gettext")
 local T = ffiUtil.template
 
@@ -62,6 +65,7 @@ function KavitaBrowser:init()
 
         -- Then load the server's content
         self.current_server_name = single_server.name
+        self.current_download_location = single_server.download_location
         self:authenticateAfterSelection(single_server.name, single_server.url)
         self:showDashboardAfterSelection(single_server.name)
 
@@ -1179,6 +1183,10 @@ function KavitaBrowser:addEditServer(item, is_edit)
         {
             hint = _("API key"),
         },
+        {
+            text = Device.home_dir,
+            hint = _("Download Location"),
+        },
     }
     local title
     if is_edit then
@@ -1186,6 +1194,7 @@ function KavitaBrowser:addEditServer(item, is_edit)
         fields[1].text = item.text
         fields[2].text = item.url
         fields[3].text = (self.servers and self.servers[item.idx] and self.servers[item.idx].api_key) or nil
+        fields[4].text = item.download_location
     else
         title = _("Add Kavita server")
     end
@@ -1202,6 +1211,22 @@ function KavitaBrowser:addEditServer(item, is_edit)
                     id = "close",
                     callback = function()
                         UIManager:close(dialog)
+                    end,
+                },
+                {
+                    text = _("Choose Download Folder"),
+                    id = "choose_download_folder",
+                    callback = function()
+                        local force_chooser_dir
+                        if Device:isAndroid() then
+                            force_chooser_dir = Device.home_dir
+                        end
+
+                        require("ui/downloadmgr"):new{
+                            onConfirm = function(folder)
+                                fields[4].text = folder
+                            end,
+                        }:chooseDir(force_chooser_dir)
                     end,
                 },
                 {
@@ -1226,6 +1251,7 @@ function KavitaBrowser:editServerFromInput(fields, item)
         name        = fields[1],
         kavita_url  = fields[2]:match("^%a+://") and fields[2] or "http://" .. fields[2],
         api_key     = fields[3] ~= "" and fields[3] or nil,
+        download_location = fields[4]
     }
     local new_item = buildRootEntry(new_server)
     local new_idx, itemnumber
