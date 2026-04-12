@@ -839,6 +839,22 @@ function KavitaClient:getChapterById(chapterId)
     return data, code, headers, status, body
 end
 
+-- Download chapter: GET /api/Download/chapter?chapterId={id}
+-- Returns: code, headers, status, body_str
+function KavitaClient:downloadChapterById(chapterId)
+    if not chapterId then
+        logger.warn("KavitaClient:downloadChapterById: chapterId is required")
+        return nil, nil, nil, "chapterId required", nil
+    end
+
+    local code, headers, status, body_str = self:apiRequest("/api/Download/chapter", {
+        method = "GET",
+        query  = { chapterId = chapterId },
+    })
+
+    return code, headers, status, body_str
+end
+
 -- Get Kavita server version: GET /api/Plugin/version?apiKey={key}
 -- Returns: version string, code, headers, status
 function KavitaClient:getKavitaVersion()

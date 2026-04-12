@@ -10,6 +10,9 @@ local UIManager = require("ui/uimanager")
 local ffiUtil = require("ffi/util")
 local logger = require("logger")
 local KamareImageViewer = require("kamareimageviewer")
+local util = require("util")
+local Device = require("device")
+local ltn12 = require("ltn12")
 local _ = require("gettext")
 local T = ffiUtil.template
 
@@ -63,6 +66,7 @@ function KavitaBrowser:init()
 
         -- Then load the server's content
         self.current_server_name = single_server.name
+        self.current_download_location = single_server.download_location
         self:authenticateAfterSelection(single_server.name, single_server.url)
         self:showDashboardAfterSelection(single_server.name)
 
@@ -1028,6 +1032,10 @@ function KavitaBrowser:addEditServer(item, is_edit)
         {
             hint = _("API key"),
         },
+        {
+            text = Device.home_dir,
+            hint = _("Download Location"),
+        },
     }
     local title
     if is_edit then
@@ -1035,6 +1043,7 @@ function KavitaBrowser:addEditServer(item, is_edit)
         fields[1].text = item.text
         fields[2].text = item.url
         fields[3].text = (self.servers and self.servers[item.idx] and self.servers[item.idx].api_key) or nil
+        fields[4].text = item.download_location
     else
         title = _("Add Kavita server")
     end
@@ -1051,6 +1060,22 @@ function KavitaBrowser:addEditServer(item, is_edit)
                     id = "close",
                     callback = function()
                         UIManager:close(dialog)
+                    end,
+                },
+                {
+                    text = _("Choose Download Folder"),
+                    id = "choose_download_folder",
+                    callback = function()
+                        local force_chooser_dir
+                        if Device:isAndroid() then
+                            force_chooser_dir = Device.home_dir
+                        end
+
+                        require("ui/downloadmgr"):new{
+                            onConfirm = function(folder)
+                                fields[4].text = folder
+                            end,
+                        }:chooseDir(force_chooser_dir)
                     end,
                 },
                 {
@@ -1075,6 +1100,7 @@ function KavitaBrowser:editServerFromInput(fields, item)
         name        = fields[1],
         kavita_url  = fields[2]:match("^%a+://") and fields[2] or "http://" .. fields[2],
         api_key     = fields[3] ~= "" and fields[3] or nil,
+        download_location = fields[4]
     }
     local new_item = buildRootEntry(new_server)
     local new_idx, itemnumber
@@ -1697,6 +1723,49 @@ function KavitaBrowser:onMenuHold(item)
             },
         }
 
+        -- Add "Download" option
+        if util.directoryExists(self.current_download_location) then
+            local download_folder = self.current_download_location .. "/" ..  util.getSafeFilename(series.localizedName)
+            table.insert(buttons, {
+                {
+                    text = "\u{21D3} " .. _("Download Series"),
+                    callback = function()
+                        UIManager:close(dialog)
+                        util.makePath(download_folder)
+                        local downloadSuccess = false
+                        logger.info(series)
+
+                        local detail, code = KavitaClient:getSeriesDetail(series.id)
+                        if not detail or code ~= 200 then
+                            UIManager:show(InfoMessage:new { text = _("Failed to retrieve chapters") })
+                            return nil
+                        end
+
+                        for i, chapter in ipairs(detail.chapters) do
+                            local directory, fileName = util.splitFilePathName(chapter.files[1].filePath)
+                            local download_location = download_folder .. "/" .. util.getSafeFilename(fileName)
+                            if not util.fileExists(download_location) then
+                                local code, headers, status, body_str = KavitaClient:downloadChapterById(chapter.id)
+                                if not body_str or code ~= 200 then
+                                    UIManager:show(InfoMessage:new { text = _("Failed to download chapter") })
+                                    break
+                                else
+                                    util.makePath(download_folder)
+                                    local file = assert(io.open(download_location, 'w'))
+                                    file:write(body_str)
+                                    file:close()
+                                    downloadSuccess = true
+                                end
+                            end
+                        end
+                        if downloadSuccess then
+                            UIManager:show(InfoMessage:new{ text = _("Series successfully downloaded") })
+                        end
+                    end,
+                },
+            })
+        end
+
         dialog = ButtonDialog:new{
             title = item.text,
             title_align = "center",
@@ -1843,6 +1912,42 @@ function KavitaBrowser:onMenuHold(item)
                 end,
             },
         })
+
+        -- Add "Download" option
+        table.insert(buttons, {}) -- separator
+
+        if util.directoryExists(self.current_download_location) then
+            local download_folder = self.current_download_location
+            if self.current_series_names then
+                download_folder = download_folder .. "/" ..  util.getSafeFilename(self.current_series_names.localizedName)
+            end
+            local directory, fileName = util.splitFilePathName(chapter.files[1].filePath)
+            local download_location = download_folder .. "/" .. util.getSafeFilename(fileName)
+
+            local text = "\u{21D3} " .. _("Download")
+            if util.fileExists(download_location) then
+                text = text .. " \u{2713}"
+            end
+
+            table.insert(buttons, {
+                {
+                    text = text,
+                    callback = function()
+                        UIManager:close(dialog)
+                        local code, headers, status, body_str = KavitaClient:downloadChapterById(chapter.id)
+                        if not body_str or code ~= 200 then
+                            UIManager:show(InfoMessage:new{ text = _("Failed to download chapter") })
+                        else
+                            util.makePath(download_folder)
+                            local file = assert(io.open(download_location, 'w'))
+                            file:write(body_str)
+                            file:close()
+                            UIManager:show(InfoMessage:new{ text = _("Chapter successfully downloaded") })
+                        end
+                    end,
+                },
+            })
+        end
 
         dialog = ButtonDialog:new{
             title = item.text,
