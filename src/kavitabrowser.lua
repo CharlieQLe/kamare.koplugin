@@ -1940,6 +1940,49 @@ function KavitaBrowser:handleMenuHoldSeries(item)
         },
     }
 
+    -- Add "Download" option
+    if util.directoryExists(self.current_download_location) then
+        local download_folder = self.current_download_location .. "/" ..  util.getSafeFilename(series.localizedName)
+        table.insert(buttons, {
+            {
+                text = "\u{21D3} " .. _("Download Series"),
+                callback = function()
+                    UIManager:close(dialog)
+                    util.makePath(download_folder)
+                    local downloadSuccess = false
+                    logger.info(series)
+
+                    local detail, code = KavitaClient:getSeriesDetail(series.id)
+                    if not detail or code ~= 200 then
+                        UIManager:show(InfoMessage:new { text = _("Failed to retrieve chapters") })
+                        return nil
+                    end
+
+                    for i, chapter in ipairs(detail.chapters) do
+                        local __, fileName = util.splitFilePathName(chapter.files[1].filePath)
+                        local download_location = download_folder .. "/" .. util.getSafeFilename(fileName)
+                        if not util.fileExists(download_location) then
+                            local code, headers, status, body_str = KavitaClient:downloadChapterById(chapter.id)
+                            if not body_str or code ~= 200 then
+                                UIManager:show(InfoMessage:new { text = _("Failed to download chapter") })
+                                break
+                            else
+                                util.makePath(download_folder)
+                                local file = assert(io.open(download_location, 'w'))
+                                file:write(body_str)
+                                file:close()
+                                downloadSuccess = true
+                            end
+                        end
+                    end
+                    if downloadSuccess then
+                        UIManager:show(InfoMessage:new{ text = _("Series successfully downloaded") })
+                    end
+                end,
+            },
+        })
+    end
+
     dialog = ButtonDialog:new{
         title = item.text,
         title_align = "center",
@@ -2093,6 +2136,42 @@ function KavitaBrowser:handleMenuHoldChapter(item)
             end,
         },
     })
+
+    table.insert(buttons, {}) -- separator
+
+    -- Add "Download" option
+    if util.directoryExists(self.current_download_location) then
+        local download_folder = self.current_download_location
+        if self.current_series_names then
+            download_folder = download_folder .. "/" ..  util.getSafeFilename(self.current_series_names.localizedName)
+        end
+        local directory, fileName = util.splitFilePathName(chapter.files[1].filePath)
+        local download_location = download_folder .. "/" .. util.getSafeFilename(fileName)
+
+        local text = "\u{21D3} " .. _("Download")
+        if util.fileExists(download_location) then
+            text = text .. " \u{2713}"
+        end
+
+        table.insert(buttons, {
+            {
+                text = text,
+                callback = function()
+                    UIManager:close(dialog)
+                    local code, headers, status, body_str = KavitaClient:downloadChapterById(chapter.id)
+                    if not body_str or code ~= 200 then
+                        UIManager:show(InfoMessage:new{ text = _("Failed to download chapter") })
+                    else
+                        util.makePath(download_folder)
+                        local file = assert(io.open(download_location, 'w'))
+                        file:write(body_str)
+                        file:close()
+                        UIManager:show(InfoMessage:new{ text = _("Chapter successfully downloaded") })
+                    end
+                end,
+            },
+        })
+    end
 
     dialog = ButtonDialog:new{
         title = item.text,
