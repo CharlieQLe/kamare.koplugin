@@ -572,7 +572,7 @@ function KavitaBrowser:buildKavitaVolumeItems(volumes)
 end
 
 -- Build menu entries for ChapterDto[]
-function KavitaBrowser:buildKavitaChapterItems(chapters, kind)
+function KavitaBrowser:buildKavitaChapterItems(chapters, library_name, kind)
     local items = {}
     if type(chapters) == "table" then
         for __, c in ipairs(chapters) do
@@ -606,6 +606,7 @@ function KavitaBrowser:buildKavitaChapterItems(chapters, kind)
                 mandatory = self.has_coverbrowser and nil or mandatory,
                 kavita_chapter = true,
                 chapter = c,
+                library_name = library_name,
                 is_special = (kind == "special") or nil,
             }
 
@@ -624,7 +625,7 @@ function KavitaBrowser:buildKavitaChapterItems(chapters, kind)
 end
 
 -- Fetch SeriesDetail and display Volumes, then Chapters, then Specials
-function KavitaBrowser:showSeriesDetail(series_name, series_id, library_id, opts)
+function KavitaBrowser:showSeriesDetail(series_name, series_id, library_id, library_name, opts)
     local loading = InfoMessage:new{ text = _("Loading..."), timeout = 0 }
     UIManager:show(loading)
     UIManager:forceRePaint()
@@ -636,10 +637,12 @@ function KavitaBrowser:showSeriesDetail(series_name, series_id, library_id, opts
     -- Track series context for reader progress (requires seriesId and libraryId)
     self.current_series_id = series_id
     self.current_series_library_id = library_id
+    self.current_series_library_name = library_name
     if not self.current_series_library_id then
         local series = KavitaClient:getSeriesById(series_id)
         if type(series) == "table" and series.libraryId then
             self.current_series_library_id = series.libraryId
+            self.current_series_library_name = series.libraryName
         end
     end
 
@@ -649,9 +652,10 @@ function KavitaBrowser:showSeriesDetail(series_name, series_id, library_id, opts
     end
 
     local items = {}
+
     for _, it in ipairs(self:buildKavitaVolumeItems(detail.volumes or {})) do table.insert(items, it) end
-    for _, it in ipairs(self:buildKavitaChapterItems(detail.chapters or {}, "chapter")) do table.insert(items, it) end
-    for _, it in ipairs(self:buildKavitaChapterItems(detail.specials or {}, "special")) do table.insert(items, it) end
+    for _, it in ipairs(self:buildKavitaChapterItems(detail.chapters or {}, library_name, "chapter")) do table.insert(items, it) end
+    for _, it in ipairs(self:buildKavitaChapterItems(detail.specials or {}, library_name, "special")) do table.insert(items, it) end
 
     self.catalog_title = series_name or _("Series")
     self.search_url = nil
@@ -1471,11 +1475,12 @@ function KavitaBrowser:launchKavitaChapterViewer(chapter, series_name, is_volume
             local sid = self.current_series_id
             if not sid then return end
             local lid = self.current_series_library_id
+            local lname = self.current_series_library_name
             local sname = self.catalog_title
                 or (self.current_series_names and (self.current_series_names.localizedName or self.current_series_names.name))
                 or _("Series")
             UIManager:nextTick(function()
-                self:showSeriesDetail(sname, sid, lid, { refresh_only = true })
+                self:showSeriesDetail(sname, sid, lid, lname, { refresh_only = true })
             end)
         end,
         on_next_chapter_callback = function(next_chapter_id)
@@ -1576,13 +1581,14 @@ function KavitaBrowser:onMenuSelect(item)
     end
 
     if item.kavita_recently_added and item.recent and item.recent.seriesId then
-        self:showSeriesDetail(item.text, item.recent.seriesId, nil)
+        self:showSeriesDetail(item.text, item.recent.seriesId, nil, nil)
         return true
     end
 
     if item.kavita_series and item.series then
         local sid = item.series.id or item.series.seriesId
         local lid = item.series.libraryId or (item.series.library and item.series.library.id)
+        local lname = item.series.libraryName
         if sid then
             -- Remember series naming metadata for the reader
             local s = item.series or {}
@@ -1593,7 +1599,7 @@ function KavitaBrowser:onMenuSelect(item)
                 -- Raw author data if present; will be normalized later
                 author = s.author or s.authors or s.writers,
             }
-            self:showSeriesDetail(item.text, sid, lid)
+            self:showSeriesDetail(item.text, sid, lid, lname)
             return true
         end
     end
@@ -1876,6 +1882,7 @@ function KavitaBrowser:handleMenuHoldSeries(item)
     local series = item.series
     local sid = series.id or series.seriesId
     local lid = series.libraryId or (series.library and series.library.id)
+    local lname = series.libraryName
 
     if not sid then
         UIManager:show(InfoMessage:new{ text = _("Series ID not available") })
@@ -1905,6 +1912,7 @@ function KavitaBrowser:handleMenuHoldSeries(item)
 
                     self.current_series_id = sid
                     self.current_series_library_id = lid
+                    self.current_series_library_name = lname
                     self.current_series_names = {
                         name = item.text,
                         originalName = series.originalName or series.seriesName or series.name,
@@ -1925,7 +1933,7 @@ function KavitaBrowser:handleMenuHoldSeries(item)
                         localizedName = series.localizedName,
                         author = series.author or series.authors or series.writers,
                     }
-                    self:showSeriesDetail(item.text, sid, lid)
+                    self:showSeriesDetail(item.text, sid, lid, lname)
                 end,
             },
         },
@@ -1942,7 +1950,7 @@ function KavitaBrowser:handleMenuHoldSeries(item)
 
     -- Add "Download" option
     if util.directoryExists(self.current_download_location) then
-        local download_folder = self.current_download_location .. "/" ..  util.getSafeFilename(series.localizedName)
+        local download_folder = self.current_download_location .. "/" .. lname .. "/" .. util.getSafeFilename(series.localizedName)
         table.insert(buttons, {
             {
                 text = "\u{21D3} " .. _("Download Series"),
@@ -1950,7 +1958,6 @@ function KavitaBrowser:handleMenuHoldSeries(item)
                     UIManager:close(dialog)
                     util.makePath(download_folder)
                     local downloadSuccess = false
-                    logger.info(series)
 
                     local detail, code = KavitaClient:getSeriesDetail(series.id)
                     if not detail or code ~= 200 then
@@ -2123,11 +2130,12 @@ function KavitaBrowser:handleMenuHoldChapter(item)
                     local sid = self.current_series_id
                     if sid then
                         local lid = self.current_series_library_id
+                        local lname = self.current_series_library_name
                         local sname = self.catalog_title
                             or (self.current_series_names and (self.current_series_names.localizedName or self.current_series_names.name))
                             or _("Series")
                         UIManager:nextTick(function()
-                            self:showSeriesDetail(sname, sid, lid, { refresh_only = true })
+                            self:showSeriesDetail(sname, sid, lid, lname, { refresh_only = true })
                         end)
                     end
                 else
@@ -2141,11 +2149,14 @@ function KavitaBrowser:handleMenuHoldChapter(item)
 
     -- Add "Download" option
     if util.directoryExists(self.current_download_location) then
-        local download_folder = self.current_download_location
+        local download_folder = self.current_download_location .. "/"
+        if item.library_name then
+            download_folder = download_folder .. "/" .. item.library_name
+        end
         if self.current_series_names then
             download_folder = download_folder .. "/" ..  util.getSafeFilename(self.current_series_names.localizedName)
         end
-        local directory, fileName = util.splitFilePathName(chapter.files[1].filePath)
+        local __, fileName = util.splitFilePathName(chapter.files[1].filePath)
         local download_location = download_folder .. "/" .. util.getSafeFilename(fileName)
 
         local text = "\u{21D3} " .. _("Download")
@@ -2315,11 +2326,12 @@ function KavitaBrowser:handleMenuHoldVolume(item)
                     local sid = self.current_series_id
                     if sid then
                         local lid = self.current_series_library_id
+                        local lname = self.current_series_library_name
                         local sname = self.catalog_title
                             or (self.current_series_names and (self.current_series_names.localizedName or self.current_series_names.name))
                             or _("Series")
                         UIManager:nextTick(function()
-                            self:showSeriesDetail(sname, sid, lid, { refresh_only = true })
+                            self:showSeriesDetail(sname, sid, lid, lname, { refresh_only = true })
                         end)
                     end
                 else
