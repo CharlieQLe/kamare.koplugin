@@ -19,11 +19,10 @@ local function progress_icon(read, total)
     if read <= 0 then return "○" end -- 0%
     local r = read / total
     if r >= 1.0 then return "●" end -- 100%
-    if r > 0.5 then return "◕" end  -- >50%–<100%
+    if r > 0.5 then return "◕" end -- >50%–<100%
     if r > 0.25 then return "◑" end -- >25%–<=50%
-    return "◔"                      -- >0%–<=25%
+    return "◔" -- >0%–<=25%
 end
-
 
 local KavitaBrowser = Menu:extend{
     title_shrink_font_to_fit = true,
@@ -285,6 +284,34 @@ function KavitaBrowser:showTitleMenu()
     UIManager:show(dialog)
 end
 
+function KavitaBrowser:buildKavitaLibraryItems(libraries)
+    local items = {}
+    if type(libraries) == "table" then
+        for __, library in ipairs(libraries) do
+            local id = library.id
+            local name = library.name
+            local item = {
+                id = id,
+                text = name,
+                kavita_library = true,
+                library = library,
+            }
+
+            -- Library items are folders, not files
+            -- CoverBrowser needs a path even for directories
+            if self.has_coverbrowser then
+                item.is_file = false  -- Mark as directory
+                -- Provide a dummy directory path
+                item.path = string.format("/kavita/%s/library/%d/",
+                    self.current_server_name or "unknown", id)
+            end
+
+            table.insert(items, item)
+        end
+    end
+    return items
+end
+
 -- Build menu entries from the Kavita dashboard array
 function KavitaBrowser:buildKavitaDashboardItems(dashboard)
     local items = {}
@@ -357,16 +384,31 @@ function KavitaBrowser:showDashboardAfterSelection(server_name)
     UIManager:show(loading)
     UIManager:forceRePaint()
 
-    local data, code, __, status = KavitaClient:getDashboard()
+    local dashboard_data, dashboard_code, __, dashboard_status = KavitaClient:getDashboard()
+    local library_data, library_code, __, library_status = KavitaClient:getLibraries()
 
     UIManager:close(loading)
 
-    if not data then
-        self:handleCatalogError("dashboard", "/api/Stream/dashboard", status or code)
+    if (not dashboard_data) or (not library_data) then
+        if not dashboard_data then
+            self:handleCatalogError("dashboard", "/api/Stream/dashboard", dashboard_status or dashboard_code)
+        end
+        if not library_data then
+            self:handleCatalogError("libraries", "/api/Library/libraries", library_status or library_code)
+        end
         return
     end
 
-    local items = self:buildKavitaDashboardItems(data)
+    local dashboard_items = self:buildKavitaDashboardItems(dashboard_data)
+    local library_items = self:buildKavitaLibraryItems(library_data)
+    local items = {}
+    for __, item in ipairs(dashboard_items) do
+        table.insert(items, item)
+    end
+    for __, item in ipairs(library_items) do
+        table.insert(items, item)
+    end
+
     self.catalog_title = server_name
     self.search_url = nil
 
@@ -533,7 +575,7 @@ function KavitaBrowser:buildKavitaChapterItems(chapters, kind)
             local ch_prefix = c.number and ("Ch. " .. tostring(c.number)) or nil
             local base
 
-            if c.titleName and c.titleName ~= "" then
+            if c.format == 1 and c.titleName and c.titleName ~= "" then
                 local lower = c.titleName:lower()
                 if not (lower:find("ch") or lower:find("chap") or lower:find("chapter") or lower:find("vol") or lower:find("volume")) and ch_prefix then
                     base = ch_prefix .. ": " .. c.titleName
@@ -566,8 +608,8 @@ function KavitaBrowser:buildKavitaChapterItems(chapters, kind)
             -- Add virtual filepath (always set to prevent CoverBrowser crashes)
             if c.id then
                 item.file = string.format("/kavita/%s/chapter/%d.kavita",
-                                         self.current_server_name or "unknown",
-                                         c.id)
+                    self.current_server_name or "unknown",
+                    c.id)
                 item.is_file = true
             end
 
@@ -659,7 +701,11 @@ function KavitaBrowser:showSeriesDetail(series_name, series_id, library_id, opts
     -- Push a sentinel so back returns to the stream list (skip when refreshing)
     if not refresh_only then
         self.paths = self.paths or {}
-        table.insert(self.paths, { kavita_stream_root = self.current_stream_name, title = self.catalog_title })
+        if self.current_stream_name then
+            table.insert(self.paths, { kavita_stream_root = self.current_stream_name, title = self.catalog_title })
+        else
+            table.insert(self.paths, { kavita_library_root = self.current_library_id, title = self.catalog_title })
+        end
     end
 
     -- Pass -1 to maintain current page when refreshing, nil to reset to page 1
@@ -772,6 +818,7 @@ function KavitaBrowser:showKavitaStream(stream_name, stream_type, stream_title, 
 
     -- Remember current stream for back navigation from series detail
     self.current_stream_name = stream_name
+    self.current_library_id = nil
 
     -- Determine title from streamType or provided stream_title
     if not stream_title then
@@ -804,6 +851,110 @@ function KavitaBrowser:showKavitaStream(stream_name, stream_type, stream_title, 
             stream_type = stream_type,
             stream_title = stream_title,
             smart_filter_encoded = smart_filter_encoded,
+            title = self.catalog_title
+        })
+    end
+
+    self:switchItemTable(self.catalog_title, items, nil, nil, nil)
+    self:setTitleBarLeftIcon("appbar.menu")
+    self.onLeftButtonTap = function()
+        self:showTitleMenu()
+    end
+end
+
+-- Fetch a specific Kavita library and display series
+function KavitaBrowser:showKavitaLibrary(library_id, library_name)
+    local loading = InfoMessage:new { text = _("Loading..."), timeout = 0 }
+    UIManager:show(loading)
+    UIManager:forceRePaint()
+
+    -- Determine pagination strategy based on stream type
+    local max_pages = nil
+
+    -- Fetch all pages until we get less than page_size results or empty results
+    local all_data = {}
+    local page_num = 1
+    local page_size = 50
+    local has_more = true
+
+    while has_more do
+        local params = {
+            PageNumber = page_num,
+            PageSize = page_size,
+        }
+
+        local data, code, __, status = KavitaClient:getLibrarySeries(library_id, params)
+
+        if not data then
+            UIManager:close(loading)
+            self:handleCatalogError("library", "/api/Library/" .. tostring(library_id), status or code)
+            return
+        end
+
+        -- Append results to all_data
+        if type(data) == "table" and #data > 0 then
+            for _, item in ipairs(data) do
+                table.insert(all_data, item)
+            end
+
+            -- Check if we should continue fetching
+            if #data < page_size then
+                has_more = false
+            elseif max_pages and page_num >= max_pages then
+                has_more = false -- Reached max page limit
+            else
+                page_num = page_num + 1
+            end
+        else
+            has_more = false
+        end
+    end
+
+
+    UIManager:close(loading)
+
+    local data = all_data
+
+    -- Normalize response to a flat array of SeriesDto
+    local series_list = data
+    if type(data) == "table" and #data == 0 then
+        series_list = data.items or data.series or data.data or data.results or data.entries
+        if type(series_list) ~= "table" then
+            local tmp = {}
+            for _, v in pairs(data) do
+                if type(v) == "table" then
+                    if v.id and (v.name or v.localizedName or v.originalName) then
+                        table.insert(tmp, v)
+                    elseif type(v[1]) == "table" then
+                        for __, vv in ipairs(v) do
+                            if type(vv) == "table" and (vv.name or vv.localizedName or vv.originalName) then
+                                table.insert(tmp, vv)
+                            end
+                        end
+                    end
+                end
+            end
+            series_list = tmp
+        end
+    end
+
+    local items = self:buildKavitaSeriesItems(series_list or {})
+
+    -- Remember current library for back navigation from series detail
+    self.current_stream_name = nil
+    self.current_library_id = library_id
+
+    self.catalog_title = library_name
+    self.search_url = nil
+
+    -- Push library path so back returns to dashboard
+    self.paths = self.paths or {}
+
+    local top = self.paths[#self.paths]
+
+    if not (top and top.kavita_library_root == library_id) then
+        table.insert(self.paths, {
+            kavita_library_root = library_id,
             title = self.catalog_title
         })
     end
@@ -1120,6 +1271,8 @@ function KavitaBrowser:handleCatalogError(context, item_url, error_msg)
     local message
     if context == "dashboard" then
         message = _("Cannot load dashboard. Please check your connection.")
+    elseif context == "libraries" then
+        message = _("Cannot load libraries. Please check your connection.")
     elseif context == "search" then
         message = _("Search failed. Please try again.")
     elseif context == "series" then
@@ -1138,6 +1291,11 @@ end
 -- Launch the Kavita chapter viewer using Reader/image endpoint
 function KavitaBrowser:launchKavitaChapterViewer(chapter, series_name, is_volume, override_view_mode)
     if not chapter or not chapter.id then return end
+
+    if chapter.format ~= 1 then
+        UIManager:show(InfoMessage:new{ text = "The chapter's file type is not supported." })
+        return
+    end
 
     local pages = chapter.pages or (chapter.files and #chapter.files) or 0
     if pages <= 0 then
@@ -1431,6 +1589,11 @@ function KavitaBrowser:onMenuSelect(item)
         return true
     end
 
+    if item.kavita_library then
+        self:showKavitaLibrary(item.id, item.text)
+        return true
+    end
+
     if #self.paths == 0 then -- root list
         self.current_server_name    = item.text
         self:authenticateAfterSelection(item.text, item.url)
@@ -1630,134 +1793,193 @@ end
 function KavitaBrowser:onMenuHold(item)
     -- Handle series long-press for continue reading
     if item.kavita_series and item.series then
-        local series = item.series
-        local sid = series.id or series.seriesId
-        local lid = series.libraryId or (series.library and series.library.id)
-
-        if not sid then
-            UIManager:show(InfoMessage:new{ text = _("Series ID not available") })
-            return true
-        end
-
-        local dialog
-        local buttons = {
-            {
-                {
-                    text = _("Continue Reading") .. " \u{25B6}",
-                    callback = function()
-                        UIManager:close(dialog)
-
-                        local loading = InfoMessage:new{ text = _("Loading..."), timeout = 0 }
-                        UIManager:show(loading)
-                        UIManager:forceRePaint()
-
-                        local chapter, _ = KavitaClient:getContinuePoint(sid)
-
-                        UIManager:close(loading)
-
-                        if not chapter then
-                            UIManager:show(InfoMessage:new{ text = _("Failed to get continue point") })
-                            return
-                        end
-
-                        self.current_series_id = sid
-                        self.current_series_library_id = lid
-                        self.current_series_names = {
-                            name = item.text,
-                            originalName = series.originalName or series.seriesName or series.name,
-                            localizedName = series.localizedName,
-                            author = series.author or series.authors or series.writers,
-                        }
-
-                        self:launchKavitaChapterViewer(chapter, item.text)
-                    end,
-                },
-                {
-                    text = _("View Series"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        self.current_series_names = {
-                            name = item.text,
-                            originalName = series.originalName or series.seriesName or series.name,
-                            localizedName = series.localizedName,
-                            author = series.author or series.authors or series.writers,
-                        }
-                        self:showSeriesDetail(item.text, sid, lid)
-                    end,
-                },
-            },
-            {
-                {
-                    text = "\u{F05A} " .. _("Series Info"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        self:showSeriesInfo(item.text, sid)
-                    end,
-                },
-            },
-        }
-
-        dialog = ButtonDialog:new{
-            title = item.text,
-            title_align = "center",
-            buttons = buttons,
-        }
-        UIManager:show(dialog)
-        return true
+        return self:handleMenuHoldSeries(item)
     end
 
     -- Handle chapter/volume long-press for reading options
     if item.kavita_chapter and item.chapter and item.chapter.id then
-        local chapter = item.chapter
-        local pages = chapter.pages or (chapter.files and #chapter.files) or 0
-        if pages <= 0 then
-            UIManager:show(InfoMessage:new{ text = _("This chapter has no pages to display") })
-            return true
-        end
+        return self:handleMenuHoldChapter(item)
+    end
 
-        local dialog
-        local buttons = {
+    -- Handle volume long-press for reading options
+    if item.kavita_volume and item.volume and item.volume.id then
+        return self:handleMenuHoldVolume(item)
+    end
+
+    -- Handle server (root list) long-press for Edit/Delete
+    if #self.paths > 0 then return true end -- not root list
+    local dialog
+    dialog = ButtonDialog:new{
+        title = item.text,
+        title_align = "center",
+        buttons = {
             {
                 {
-                    text = "\u{2194} " .. _("Page mode"),
+                    text = _("Delete"),
                     callback = function()
-                        UIManager:close(dialog)
-                        -- Launch in page mode (view_mode=0), continue from last position
-                        self:launchKavitaChapterViewer(chapter, self.catalog_title or self.current_server_name, false, 0)
+                        UIManager:show(ConfirmBox:new{
+                            text = _("Delete Kavita server?"),
+                            ok_text = _("Delete"),
+                            ok_callback = function()
+                                UIManager:close(dialog)
+                                self:deleteCatalog(item)
+                            end,
+                        })
                     end,
                 },
                 {
-                    text = "\u{2195} " .. _("Continuous"),
+                    text = _("Edit"),
                     callback = function()
                         UIManager:close(dialog)
-                        -- Launch in continuous mode (view_mode=1), continue from last position
-                        self:launchKavitaChapterViewer(chapter, self.catalog_title or self.current_server_name, false, 1)
+                        self:addEditServer(item, true)
                     end,
                 },
             },
-            {},  -- separator
+        },
+    }
+    UIManager:show(dialog)
+    return true
+end
+
+function KavitaBrowser:handleMenuHoldSeries(item)
+    if not item.kavita_series or not item.series then
+        UIManager:show(InfoMessage:new{ text = _("Item is not a series") })
+        return true
+    end
+
+    local series = item.series
+    local sid = series.id or series.seriesId
+    local lid = series.libraryId or (series.library and series.library.id)
+
+    if not sid then
+        UIManager:show(InfoMessage:new{ text = _("Series ID not available") })
+        return true
+    end
+
+    local dialog
+    local buttons = {
+        {
             {
-                {
-                    text = "\u{23EE} " .. _("From start"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        -- Override start page to 1
-                        local original_pages_read = chapter.pagesRead
-                        chapter.pagesRead = 0
-                        self:launchKavitaChapterViewer(chapter, self.catalog_title or self.current_server_name, false)
-                        chapter.pagesRead = original_pages_read
-                    end,
-                },
-                {
-                    text = _("Continue") .. " \u{25B6}",
-                    callback = function()
-                        UIManager:close(dialog)
-                        -- Use normal behavior (resume from pagesRead)
-                        self:launchKavitaChapterViewer(chapter, self.catalog_title or self.current_server_name, false)
-                    end,
-                },
+                text = _("Continue Reading") .. " \u{25B6}",
+                callback = function()
+                    UIManager:close(dialog)
+
+                    local loading = InfoMessage:new{ text = _("Loading..."), timeout = 0 }
+                    UIManager:show(loading)
+                    UIManager:forceRePaint()
+
+                    local chapter, _ = KavitaClient:getContinuePoint(sid)
+
+                    UIManager:close(loading)
+
+                    if not chapter then
+                        UIManager:show(InfoMessage:new{ text = _("Failed to get continue point") })
+                        return
+                    end
+
+                    self.current_series_id = sid
+                    self.current_series_library_id = lid
+                    self.current_series_names = {
+                        name = item.text,
+                        originalName = series.originalName or series.seriesName or series.name,
+                        localizedName = series.localizedName,
+                        author = series.author or series.authors or series.writers,
+                    }
+
+                    self:launchKavitaChapterViewer(chapter, item.text)
+                end,
             },
-        }
+            {
+                text = _("View Series"),
+                callback = function()
+                    UIManager:close(dialog)
+                    self.current_series_names = {
+                        name = item.text,
+                        originalName = series.originalName or series.seriesName or series.name,
+                        localizedName = series.localizedName,
+                        author = series.author or series.authors or series.writers,
+                    }
+                    self:showSeriesDetail(item.text, sid, lid)
+                end,
+            },
+        },
+        {
+            {
+                text = "\u{F05A} " .. _("Series Info"),
+                callback = function()
+                    UIManager:close(dialog)
+                    self:showSeriesInfo(item.text, sid)
+                end,
+            },
+        },
+    }
+
+    dialog = ButtonDialog:new{
+        title = item.text,
+        title_align = "center",
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+    return true
+end
+
+function KavitaBrowser:handleMenuHoldChapter(item)
+    if not item.kavita_chapter or not item.chapter or not item.chapter.id then
+        UIManager:show(InfoMessage:new{ text = _("Item is not a chapter") })
+        return true
+    end
+    local chapter = item.chapter
+    local pages = chapter.pages or (chapter.files and #chapter.files) or 0
+    if pages <= 0 then
+        UIManager:show(InfoMessage:new{ text = _("This chapter has no pages to display") })
+        return true
+    end
+
+    local dialog
+    local buttons = {}
+
+    -- Display for cbr and cbz
+    if chapter.format == 1 then
+        table.insert(buttons, {
+            {
+                text = "\u{2194} " .. _("Page mode"),
+                callback = function()
+                    UIManager:close(dialog)
+                    -- Launch in page mode (view_mode=0), continue from last position
+                    self:launchKavitaChapterViewer(chapter, self.catalog_title or self.current_server_name, false, 0)
+                end,
+            },
+            {
+                text = "\u{2195} " .. _("Continuous"),
+                callback = function()
+                    UIManager:close(dialog)
+                    -- Launch in continuous mode (view_mode=1), continue from last position
+                    self:launchKavitaChapterViewer(chapter, self.catalog_title or self.current_server_name, false, 1)
+                end,
+            },
+        })
+        table.insert(buttons, {})  -- separator
+        table.insert(buttons, {
+            {
+                text = "\u{23EE} " .. _("From start"),
+                callback = function()
+                    UIManager:close(dialog)
+                    -- Override start page to 1
+                    local original_pages_read = chapter.pagesRead
+                    chapter.pagesRead = 0
+                    self:launchKavitaChapterViewer(chapter, self.catalog_title or self.current_server_name, false)
+                    chapter.pagesRead = original_pages_read
+                end,
+            },
+            {
+                text = _("Continue") .. " \u{25B6}",
+                callback = function()
+                    UIManager:close(dialog)
+                    -- Use normal behavior (resume from pagesRead)
+                    self:launchKavitaChapterViewer(chapter, self.catalog_title or self.current_server_name, false)
+                end,
+            },
+        })
 
         -- Add "Jump to" option if there are pages to jump to
         if pages > 1 then
@@ -1808,235 +2030,205 @@ function KavitaBrowser:onMenuHold(item)
             })
         end
 
-        -- Add "Mark as read" option
         table.insert(buttons, {})  -- separator
-        table.insert(buttons, {
-            {
-                text = "\u{2713} " .. _("Mark as read"),
-                callback = function()
-                    UIManager:close(dialog)
-                    -- Mark as read by reporting the last page as progress
-                    local progress = {
-                        volumeId  = chapter.volumeId,
-                        chapterId = chapter.id,
-                        pageNum   = pages + 1,  -- i lost the thread on page numbers so lets overshoot
-                        seriesId  = self.current_series_id,
-                        libraryId = self.current_series_library_id,
-                    }
-                    local code = KavitaClient:postReaderProgress(progress)
-                    if code == 200 or code == 204 then
-                        UIManager:show(InfoMessage:new{ text = _("Marked as read") })
-                        -- Refresh the series view to update progress indicators
-                        local sid = self.current_series_id
-                        if sid then
-                            local lid = self.current_series_library_id
-                            local sname = self.catalog_title
-                                or (self.current_series_names and (self.current_series_names.localizedName or self.current_series_names.name))
-                                or _("Series")
-                            UIManager:nextTick(function()
-                                self:showSeriesDetail(sname, sid, lid, { refresh_only = true })
-                            end)
-                        end
-                    else
-                        UIManager:show(InfoMessage:new{ text = _("Failed to mark as read") })
-                    end
-                end,
-            },
-        })
-
-        dialog = ButtonDialog:new{
-            title = item.text,
-            title_align = "center",
-            buttons = buttons,
-        }
-        UIManager:show(dialog)
-        return true
     end
 
-    -- Handle volume long-press for reading options
-    if item.kavita_volume and item.volume and item.volume.id then
-        local vol = item.volume
-        local ch = (type(vol.chapters) == "table") and vol.chapters[1] or nil
-        if not ch or not ch.id then
-            UIManager:show(InfoMessage:new{ text = _("This volume has no chapters available.") })
-            return true
-        end
-
-        local pages = ch.pages or (ch.files and #ch.files) or 0
-        if pages <= 0 then
-            UIManager:show(InfoMessage:new{ text = _("This volume has no pages to display") })
-            return true
-        end
-
-        local dialog
-        local buttons = {
-            {
-                {
-                    text = "\u{2194} " .. _("Page mode"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        -- Launch in page mode (view_mode=0), continue from last position
-                        self:launchKavitaChapterViewer(ch, self.catalog_title or self.current_server_name, true, 0)
-                    end,
-                },
-                {
-                    text = "\u{2195} " .. _("Continuous"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        -- Launch in continuous mode (view_mode=1), continue from last position
-                        self:launchKavitaChapterViewer(ch, self.catalog_title or self.current_server_name, true, 1)
-                    end,
-                },
-            },
-            {},  -- separator
-            {
-                {
-                    text = "\u{23EE} " .. _("From start"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        -- Override start page to 1
-                        local original_pages_read = ch.pagesRead
-                        ch.pagesRead = 0
-                        self:launchKavitaChapterViewer(ch, self.catalog_title or self.current_server_name, true)
-                        ch.pagesRead = original_pages_read
-                    end,
-                },
-                {
-                    text = _("Continue") .. " \u{25B6}",
-                    callback = function()
-                        UIManager:close(dialog)
-                        -- Use normal behavior (resume from pagesRead)
-                        self:launchKavitaChapterViewer(ch, self.catalog_title or self.current_server_name, true)
-                    end,
-                },
-            },
-        }
-
-        -- Add "Jump to" option if there are pages to jump to
-        if pages > 1 then
-            table.insert(buttons, {
-                {
-                    text = _("Jump to page") .. " \u{23E9}",
-                    callback = function()
-                        UIManager:close(dialog)
-                        local jump_dialog
-                        jump_dialog = InputDialog:new{
-                            title = _("Jump to page"),
-                            input_hint = T(_("1 - %1"), pages),
-                            input_type = "number",
-                            buttons = {
-                                {
-                                    {
-                                        text = _("Cancel"),
-                                        id = "close",
-                                        callback = function()
-                                            UIManager:close(jump_dialog)
-                                        end,
-                                    },
-                                    {
-                                        text = _("Jump"),
-                                        is_enter_default = true,
-                                        callback = function()
-                                            local page_str = jump_dialog:getInputText()
-                                            local page_num = tonumber(page_str)
-                                            UIManager:close(jump_dialog)
-                                            if not page_num or page_num < 1 or page_num > pages then
-                                                UIManager:show(InfoMessage:new{ text = T(_("Invalid page number. Please enter 1 - %1"), pages) })
-                                                return
-                                            end
-                                            -- Override start page
-                                            local original_pages_read = ch.pagesRead
-                                            ch.pagesRead = page_num - 1
-                                            self:launchKavitaChapterViewer(ch, self.catalog_title or self.current_server_name, true)
-                                            ch.pagesRead = original_pages_read
-                                        end,
-                                    },
-                                },
-                            },
-                        }
-                        UIManager:show(jump_dialog)
-                        jump_dialog:onShowKeyboard()
-                    end,
-                },
-            })
-        end
-
-        -- Add "Mark as read" option
-        table.insert(buttons, {})  -- separator
-        table.insert(buttons, {
-            {
-                text = "\u{2713} " .. _("Mark as read"),
-                callback = function()
-                    UIManager:close(dialog)
-                    -- Mark as read by reporting the last page as progress
-                    local progress = {
-                        volumeId  = ch.volumeId,
-                        chapterId = ch.id,
-                        pageNum   = pages,  -- i lost the thread on page numbers so lets overshoot
-                        seriesId  = self.current_series_id,
-                        libraryId = self.current_series_library_id,
-                    }
-                    local code = KavitaClient:postReaderProgress(progress)
-                    if code == 200 or code == 204 then
-                        UIManager:show(InfoMessage:new{ text = _("Marked as read") })
-                        -- Refresh the series view to update progress indicators
-                        local sid = self.current_series_id
-                        if sid then
-                            local lid = self.current_series_library_id
-                            local sname = self.catalog_title
-                                or (self.current_series_names and (self.current_series_names.localizedName or self.current_series_names.name))
-                                or _("Series")
-                            UIManager:nextTick(function()
-                                self:showSeriesDetail(sname, sid, lid, { refresh_only = true })
-                            end)
-                        end
-                    else
-                        UIManager:show(InfoMessage:new{ text = _("Failed to mark as read") })
+    -- Add "Mark as read" option
+    table.insert(buttons, {
+        {
+            text = "\u{2713} " .. _("Mark as read"),
+            callback = function()
+                UIManager:close(dialog)
+                -- Mark as read by reporting the last page as progress
+                local progress = {
+                    volumeId  = chapter.volumeId,
+                    chapterId = chapter.id,
+                    pageNum   = pages + 1,  -- i lost the thread on page numbers so lets overshoot
+                    seriesId  = self.current_series_id,
+                    libraryId = self.current_series_library_id,
+                }
+                local code = KavitaClient:postReaderProgress(progress)
+                if code == 200 or code == 204 then
+                    UIManager:show(InfoMessage:new{ text = _("Marked as read") })
+                    -- Refresh the series view to update progress indicators
+                    local sid = self.current_series_id
+                    if sid then
+                        local lid = self.current_series_library_id
+                        local sname = self.catalog_title
+                            or (self.current_series_names and (self.current_series_names.localizedName or self.current_series_names.name))
+                            or _("Series")
+                        UIManager:nextTick(function()
+                            self:showSeriesDetail(sname, sid, lid, { refresh_only = true })
+                        end)
                     end
-                    UIManager:close(dialog)
-                end,
-            },
-        })
+                else
+                    UIManager:show(InfoMessage:new{ text = _("Failed to mark as read") })
+                end
+            end,
+        },
+    })
 
-        dialog = ButtonDialog:new{
-            title = item.text,
-            title_align = "center",
-            buttons = buttons,
-        }
-        UIManager:show(dialog)
-        return true
-    end
-
-    -- Handle server (root list) long-press for Edit/Delete
-    if #self.paths > 0 then return true end -- not root list
-    local dialog
     dialog = ButtonDialog:new{
         title = item.text,
         title_align = "center",
-        buttons = {
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+    return true
+end
+
+function KavitaBrowser:handleMenuHoldVolume(item)
+    if not item.kavita_volume or not item.volume or not item.volume.id then
+        UIManager:show(InfoMessage:new{ text = _("Item is not a volume") })
+        return true
+    end
+    local vol = item.volume
+    local ch = (type(vol.chapters) == "table") and vol.chapters[1] or nil
+    if not ch or not ch.id then
+        UIManager:show(InfoMessage:new{ text = _("This volume has no chapters available.") })
+        return true
+    end
+
+    local pages = ch.pages or (ch.files and #ch.files) or 0
+    if pages <= 0 then
+        UIManager:show(InfoMessage:new{ text = _("This volume has no pages to display") })
+        return true
+    end
+
+    local dialog
+    local buttons = {
+        {
             {
-                {
-                    text = _("Delete"),
-                    callback = function()
-                        UIManager:show(ConfirmBox:new{
-                            text = _("Delete Kavita server?"),
-                            ok_text = _("Delete"),
-                            ok_callback = function()
-                                UIManager:close(dialog)
-                                self:deleteCatalog(item)
-                            end,
-                        })
-                    end,
-                },
-                {
-                    text = _("Edit"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        self:addEditServer(item, true)
-                    end,
-                },
+                text = "\u{2194} " .. _("Page mode"),
+                callback = function()
+                    UIManager:close(dialog)
+                    -- Launch in page mode (view_mode=0), continue from last position
+                    self:launchKavitaChapterViewer(ch, self.catalog_title or self.current_server_name, true, 0)
+                end,
+            },
+            {
+                text = "\u{2195} " .. _("Continuous"),
+                callback = function()
+                    UIManager:close(dialog)
+                    -- Launch in continuous mode (view_mode=1), continue from last position
+                    self:launchKavitaChapterViewer(ch, self.catalog_title or self.current_server_name, true, 1)
+                end,
             },
         },
+        {},  -- separator
+        {
+            {
+                text = "\u{23EE} " .. _("From start"),
+                callback = function()
+                    UIManager:close(dialog)
+                    -- Override start page to 1
+                    local original_pages_read = ch.pagesRead
+                    ch.pagesRead = 0
+                    self:launchKavitaChapterViewer(ch, self.catalog_title or self.current_server_name, true)
+                    ch.pagesRead = original_pages_read
+                end,
+            },
+            {
+                text = _("Continue") .. " \u{25B6}",
+                callback = function()
+                    UIManager:close(dialog)
+                    -- Use normal behavior (resume from pagesRead)
+                    self:launchKavitaChapterViewer(ch, self.catalog_title or self.current_server_name, true)
+                end,
+            },
+        },
+    }
+
+    -- Add "Jump to" option if there are pages to jump to
+    if pages > 1 then
+        table.insert(buttons, {
+            {
+                text = _("Jump to page") .. " \u{23E9}",
+                callback = function()
+                    UIManager:close(dialog)
+                    local jump_dialog
+                    jump_dialog = InputDialog:new{
+                        title = _("Jump to page"),
+                        input_hint = T(_("1 - %1"), pages),
+                        input_type = "number",
+                        buttons = {
+                            {
+                                {
+                                    text = _("Cancel"),
+                                    id = "close",
+                                    callback = function()
+                                        UIManager:close(jump_dialog)
+                                    end,
+                                },
+                                {
+                                    text = _("Jump"),
+                                    is_enter_default = true,
+                                    callback = function()
+                                        local page_str = jump_dialog:getInputText()
+                                        local page_num = tonumber(page_str)
+                                        UIManager:close(jump_dialog)
+                                        if not page_num or page_num < 1 or page_num > pages then
+                                            UIManager:show(InfoMessage:new{ text = T(_("Invalid page number. Please enter 1 - %1"), pages) })
+                                            return
+                                        end
+                                        -- Override start page
+                                        local original_pages_read = ch.pagesRead
+                                        ch.pagesRead = page_num - 1
+                                        self:launchKavitaChapterViewer(ch, self.catalog_title or self.current_server_name, true)
+                                        ch.pagesRead = original_pages_read
+                                    end,
+                                },
+                            },
+                        },
+                    }
+                    UIManager:show(jump_dialog)
+                    jump_dialog:onShowKeyboard()
+                end,
+            },
+        })
+    end
+
+    -- Add "Mark as read" option
+    table.insert(buttons, {})  -- separator
+    table.insert(buttons, {
+        {
+            text = "\u{2713} " .. _("Mark as read"),
+            callback = function()
+                UIManager:close(dialog)
+                -- Mark as read by reporting the last page as progress
+                local progress = {
+                    volumeId  = ch.volumeId,
+                    chapterId = ch.id,
+                    pageNum   = pages,  -- i lost the thread on page numbers so lets overshoot
+                    seriesId  = self.current_series_id,
+                    libraryId = self.current_series_library_id,
+                }
+                local code = KavitaClient:postReaderProgress(progress)
+                if code == 200 or code == 204 then
+                    UIManager:show(InfoMessage:new{ text = _("Marked as read") })
+                    -- Refresh the series view to update progress indicators
+                    local sid = self.current_series_id
+                    if sid then
+                        local lid = self.current_series_library_id
+                        local sname = self.catalog_title
+                            or (self.current_series_names and (self.current_series_names.localizedName or self.current_series_names.name))
+                            or _("Series")
+                        UIManager:nextTick(function()
+                            self:showSeriesDetail(sname, sid, lid, { refresh_only = true })
+                        end)
+                    end
+                else
+                    UIManager:show(InfoMessage:new{ text = _("Failed to mark as read") })
+                end
+                UIManager:close(dialog)
+            end,
+        },
+    })
+
+    dialog = ButtonDialog:new{
+        title = item.text,
+        title_align = "center",
+        buttons = buttons,
     }
     UIManager:show(dialog)
     return true
@@ -2065,6 +2257,8 @@ function KavitaBrowser:onReturn()
         elseif path.kavita_dashboard_root then
             -- return to dashboard for current server
             self:showDashboardAfterSelection(self.current_server_name or self.catalog_title)
+        elseif path.kavita_library_root then
+            self:showKavitaLibrary(path.kavita_library_root, path.title)
         else
             self:init()
         end
