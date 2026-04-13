@@ -459,6 +459,14 @@ function KavitaBrowser:buildKavitaSeriesItems(series_list)
     local items = {}
     if type(series_list) == "table" then
         for i, s in ipairs(series_list) do
+            local download_folder
+            if self.current_download_location then
+                download_folder = self.current_download_location
+                local series_name = s.localizedName or s.name or s.originalName or s.seriesName or s.title
+                if series_name then
+                    download_folder = download_folder .. "/" .. util.getSafeFilename(series_name)
+                end
+            end
             local name = s.localizedName or s.name or s.originalName or s.seriesName or s.title or _("Unnamed series")
             -- Note: SeriesDto doesn't include author/writer info. That's only available
             -- in SeriesDetailDto via chapters. To avoid showing library name as "author",
@@ -469,6 +477,7 @@ function KavitaBrowser:buildKavitaSeriesItems(series_list)
                 author = "",  -- Empty - SeriesDto doesn't have author fields
                 mandatory = self.has_coverbrowser and nil or (mandatory or ""),
                 kavita_series = true,
+                download_folder = download_folder,
                 series = s, -- keep full dto for next steps
             }
 
@@ -487,7 +496,7 @@ function KavitaBrowser:buildKavitaSeriesItems(series_list)
 end
 
 -- Build menu entries for VolumeDto[]
-function KavitaBrowser:buildKavitaVolumeItems(volumes)
+function KavitaBrowser:buildKavitaVolumeItems(volumes, series_name)
     local items = {}
     if type(volumes) == "table" then
         for _, v in ipairs(volumes) do
@@ -507,11 +516,21 @@ function KavitaBrowser:buildKavitaVolumeItems(volumes)
             local total = v.pages
             local subtitle = (total and read) and (tostring(read) .. "/" .. tostring(total) .. " pages") or nil
             local mandatory = progress_icon(read, total)
+
+            local download_folder
+            if self.current_download_location then
+                download_folder = self.current_download_location
+                if series_name then
+                    download_folder = download_folder .. "/" .. util.getSafeFilename(series_name)
+                end
+            end
+
             local item = {
                 text = name,
                 author = subtitle,
                 mandatory = self.has_coverbrowser and nil or mandatory,
                 kavita_volume = true,
+                download_folder = download_folder,
                 volume = v,
             }
 
@@ -530,7 +549,7 @@ function KavitaBrowser:buildKavitaVolumeItems(volumes)
 end
 
 -- Build menu entries for ChapterDto[]
-function KavitaBrowser:buildKavitaChapterItems(chapters, kind)
+function KavitaBrowser:buildKavitaChapterItems(chapters, series_name, kind)
     local items = {}
     if type(chapters) == "table" then
         for __, c in ipairs(chapters) do
@@ -557,6 +576,19 @@ function KavitaBrowser:buildKavitaChapterItems(chapters, kind)
             end
 
             local mandatory = progress_icon(read, total)
+            local download_location
+            if self.current_download_location then
+                download_location = self.current_download_location
+                if series_name then
+                    download_location = download_location .. "/" .. util.getSafeFilename(series_name)
+                end
+                local __, fileName = util.splitFilePathName(c.files[1].filePath)
+                download_location = download_location .. "/" .. util.getSafeFilename(fileName)
+            end
+
+            if util.fileExists(download_location) then
+                mandatory = mandatory .. " \u{21D3}"
+            end
 
             local item = {
                 text = name,
@@ -564,6 +596,7 @@ function KavitaBrowser:buildKavitaChapterItems(chapters, kind)
                 mandatory = self.has_coverbrowser and nil or mandatory,
                 kavita_chapter = true,
                 chapter = c,
+                download_location = download_location,
                 is_special = (kind == "special") or nil,
             }
 
@@ -607,9 +640,9 @@ function KavitaBrowser:showSeriesDetail(series_name, series_id, library_id, opts
     end
 
     local items = {}
-    for _, it in ipairs(self:buildKavitaVolumeItems(detail.volumes or {})) do table.insert(items, it) end
-    for _, it in ipairs(self:buildKavitaChapterItems(detail.chapters or {}, "chapter")) do table.insert(items, it) end
-    for _, it in ipairs(self:buildKavitaChapterItems(detail.specials or {}, "special")) do table.insert(items, it) end
+    for _, it in ipairs(self:buildKavitaVolumeItems(detail.volumes or {}, series_name)) do table.insert(items, it) end
+    for _, it in ipairs(self:buildKavitaChapterItems(detail.chapters or {}, series_name, "chapter")) do table.insert(items, it) end
+    for _, it in ipairs(self:buildKavitaChapterItems(detail.specials or {}, series_name, "special")) do table.insert(items, it) end
 
     self.catalog_title = series_name or _("Series")
     self.search_url = nil
@@ -1661,7 +1694,7 @@ function KavitaBrowser:onMenuHold(item)
         local lid = series.libraryId or (series.library and series.library.id)
 
         if not sid then
-            UIManager:show(InfoMessage:new{ text = _("Series ID not available") })
+            UIManager:show(InfoMessage:new { text = _("Series ID not available") })
             return true
         end
 
@@ -1673,7 +1706,7 @@ function KavitaBrowser:onMenuHold(item)
                     callback = function()
                         UIManager:close(dialog)
 
-                        local loading = InfoMessage:new{ text = _("Loading..."), timeout = 0 }
+                        local loading = InfoMessage:new { text = _("Loading..."), timeout = 0 }
                         UIManager:show(loading)
                         UIManager:forceRePaint()
 
@@ -1682,7 +1715,7 @@ function KavitaBrowser:onMenuHold(item)
                         UIManager:close(loading)
 
                         if not chapter then
-                            UIManager:show(InfoMessage:new{ text = _("Failed to get continue point") })
+                            UIManager:show(InfoMessage:new { text = _("Failed to get continue point") })
                             return
                         end
 
@@ -1725,15 +1758,12 @@ function KavitaBrowser:onMenuHold(item)
 
         -- Add "Download" option
         if util.directoryExists(self.current_download_location) then
-            local download_folder = self.current_download_location .. "/" ..  util.getSafeFilename(series.localizedName)
             table.insert(buttons, {
                 {
                     text = "\u{21D3} " .. _("Download Series"),
                     callback = function()
                         UIManager:close(dialog)
-                        util.makePath(download_folder)
-                        local downloadSuccess = false
-                        logger.info(series)
+                        util.makePath(item.download_folder)
 
                         local detail, code = KavitaClient:getSeriesDetail(series.id)
                         if not detail or code ~= 200 then
@@ -1741,32 +1771,35 @@ function KavitaBrowser:onMenuHold(item)
                             return nil
                         end
 
-                        for i, chapter in ipairs(detail.chapters) do
-                            local directory, fileName = util.splitFilePathName(chapter.files[1].filePath)
-                            local download_location = download_folder .. "/" .. util.getSafeFilename(fileName)
-                            if not util.fileExists(download_location) then
-                                local code, headers, status, body_str = KavitaClient:downloadChapterById(chapter.id)
-                                if not body_str or code ~= 200 then
-                                    UIManager:show(InfoMessage:new { text = _("Failed to download chapter") })
-                                    break
-                                else
-                                    util.makePath(download_folder)
-                                    local file = assert(io.open(download_location, 'w'))
-                                    file:write(body_str)
-                                    file:close()
-                                    downloadSuccess = true
+                        local msg = InfoMessage:new { text = _("Downloading...") }
+                        UIManager:show(msg)
+
+                        local chapter_result = self:downloadChapters(item.download_folder, detail.chapters)
+                        local special_result = self:downloadChapters(item.download_folder, detail.specials)
+                        local volume_result
+                        if detail.volumes then
+                            for i, volume in ipairs(detail.volumes) do
+                                local result = self:downloadChapters(item.download_folder, volume.chapters)
+                                if i == 1 then
+                                    volume_result = result
+                                elseif volume_result and not result then
+                                    volume_result = result
                                 end
                             end
                         end
-                        if downloadSuccess then
-                            UIManager:show(InfoMessage:new{ text = _("Series successfully downloaded") })
+                        UIManager:close(msg)
+
+                        if chapter_result and special_result and volume_result then
+                            UIManager:show(InfoMessage:new { text = _("Series successfully downloaded") })
+                        else
+                            UIManager:show(InfoMessage:new { text = _("Failed to download chapter") })
                         end
                     end,
                 },
             })
         end
 
-        dialog = ButtonDialog:new{
+        dialog = ButtonDialog:new {
             title = item.text,
             title_align = "center",
             buttons = buttons,
@@ -1780,7 +1813,7 @@ function KavitaBrowser:onMenuHold(item)
         local chapter = item.chapter
         local pages = chapter.pages or (chapter.files and #chapter.files) or 0
         if pages <= 0 then
-            UIManager:show(InfoMessage:new{ text = _("This chapter has no pages to display") })
+            UIManager:show(InfoMessage:new { text = _("This chapter has no pages to display") })
             return true
         end
 
@@ -1804,7 +1837,7 @@ function KavitaBrowser:onMenuHold(item)
                     end,
                 },
             },
-            {},  -- separator
+            {}, -- separator
             {
                 {
                     text = "\u{23EE} " .. _("From start"),
@@ -1836,7 +1869,7 @@ function KavitaBrowser:onMenuHold(item)
                     callback = function()
                         UIManager:close(dialog)
                         local jump_dialog
-                        jump_dialog = InputDialog:new{
+                        jump_dialog = InputDialog:new {
                             title = _("Jump to page"),
                             input_hint = T(_("1 - %1"), pages),
                             input_type = "number",
@@ -1857,13 +1890,14 @@ function KavitaBrowser:onMenuHold(item)
                                             local page_num = tonumber(page_str)
                                             UIManager:close(jump_dialog)
                                             if not page_num or page_num < 1 or page_num > pages then
-                                                UIManager:show(InfoMessage:new{ text = T(_("Invalid page number. Please enter 1 - %1"), pages) })
+                                                UIManager:show(InfoMessage:new { text = T(_("Invalid page number. Please enter 1 - %1"), pages) })
                                                 return
                                             end
                                             -- Override start page
                                             local original_pages_read = chapter.pagesRead
                                             chapter.pagesRead = page_num - 1
-                                            self:launchKavitaChapterViewer(chapter, self.catalog_title or self.current_server_name, false)
+                                            self:launchKavitaChapterViewer(chapter,
+                                                self.catalog_title or self.current_server_name, false)
                                             chapter.pagesRead = original_pages_read
                                         end,
                                     },
@@ -1878,7 +1912,7 @@ function KavitaBrowser:onMenuHold(item)
         end
 
         -- Add "Mark as read" option
-        table.insert(buttons, {})  -- separator
+        table.insert(buttons, {}) -- separator
         table.insert(buttons, {
             {
                 text = "\u{2713} " .. _("Mark as read"),
@@ -1888,13 +1922,13 @@ function KavitaBrowser:onMenuHold(item)
                     local progress = {
                         volumeId  = chapter.volumeId,
                         chapterId = chapter.id,
-                        pageNum   = pages + 1,  -- i lost the thread on page numbers so lets overshoot
+                        pageNum   = pages + 1, -- i lost the thread on page numbers so lets overshoot
                         seriesId  = self.current_series_id,
                         libraryId = self.current_series_library_id,
                     }
                     local code = KavitaClient:postReaderProgress(progress)
                     if code == 200 or code == 204 then
-                        UIManager:show(InfoMessage:new{ text = _("Marked as read") })
+                        UIManager:show(InfoMessage:new { text = _("Marked as read") })
                         -- Refresh the series view to update progress indicators
                         local sid = self.current_series_id
                         if sid then
@@ -1907,7 +1941,7 @@ function KavitaBrowser:onMenuHold(item)
                             end)
                         end
                     else
-                        UIManager:show(InfoMessage:new{ text = _("Failed to mark as read") })
+                        UIManager:show(InfoMessage:new { text = _("Failed to mark as read") })
                     end
                 end,
             },
@@ -1917,15 +1951,8 @@ function KavitaBrowser:onMenuHold(item)
         table.insert(buttons, {}) -- separator
 
         if util.directoryExists(self.current_download_location) then
-            local download_folder = self.current_download_location
-            if self.current_series_names then
-                download_folder = download_folder .. "/" ..  util.getSafeFilename(self.current_series_names.localizedName)
-            end
-            local directory, fileName = util.splitFilePathName(chapter.files[1].filePath)
-            local download_location = download_folder .. "/" .. util.getSafeFilename(fileName)
-
             local text = "\u{21D3} " .. _("Download")
-            if util.fileExists(download_location) then
+            if util.fileExists(item.download_location) then
                 text = text .. " \u{2713}"
             end
 
@@ -1936,20 +1963,21 @@ function KavitaBrowser:onMenuHold(item)
                         UIManager:close(dialog)
                         local code, headers, status, body_str = KavitaClient:downloadChapterById(chapter.id)
                         if not body_str or code ~= 200 then
-                            UIManager:show(InfoMessage:new{ text = _("Failed to download chapter") })
+                            UIManager:show(InfoMessage:new { text = _("Failed to download chapter") })
                         else
+                            local download_folder, __ = util.splitFilePathName(item.download_location)
                             util.makePath(download_folder)
-                            local file = assert(io.open(download_location, 'w'))
+                            local file = assert(io.open(item.download_location, 'w'))
                             file:write(body_str)
                             file:close()
-                            UIManager:show(InfoMessage:new{ text = _("Chapter successfully downloaded") })
+                            UIManager:show(InfoMessage:new { text = _("Chapter successfully downloaded") })
                         end
                     end,
                 },
             })
         end
 
-        dialog = ButtonDialog:new{
+        dialog = ButtonDialog:new {
             title = item.text,
             title_align = "center",
             buttons = buttons,
@@ -1963,13 +1991,13 @@ function KavitaBrowser:onMenuHold(item)
         local vol = item.volume
         local ch = (type(vol.chapters) == "table") and vol.chapters[1] or nil
         if not ch or not ch.id then
-            UIManager:show(InfoMessage:new{ text = _("This volume has no chapters available.") })
+            UIManager:show(InfoMessage:new { text = _("This volume has no chapters available.") })
             return true
         end
 
         local pages = ch.pages or (ch.files and #ch.files) or 0
         if pages <= 0 then
-            UIManager:show(InfoMessage:new{ text = _("This volume has no pages to display") })
+            UIManager:show(InfoMessage:new { text = _("This volume has no pages to display") })
             return true
         end
 
@@ -1993,7 +2021,7 @@ function KavitaBrowser:onMenuHold(item)
                     end,
                 },
             },
-            {},  -- separator
+            {}, -- separator
             {
                 {
                     text = "\u{23EE} " .. _("From start"),
@@ -2025,7 +2053,7 @@ function KavitaBrowser:onMenuHold(item)
                     callback = function()
                         UIManager:close(dialog)
                         local jump_dialog
-                        jump_dialog = InputDialog:new{
+                        jump_dialog = InputDialog:new {
                             title = _("Jump to page"),
                             input_hint = T(_("1 - %1"), pages),
                             input_type = "number",
@@ -2046,13 +2074,14 @@ function KavitaBrowser:onMenuHold(item)
                                             local page_num = tonumber(page_str)
                                             UIManager:close(jump_dialog)
                                             if not page_num or page_num < 1 or page_num > pages then
-                                                UIManager:show(InfoMessage:new{ text = T(_("Invalid page number. Please enter 1 - %1"), pages) })
+                                                UIManager:show(InfoMessage:new { text = T(_("Invalid page number. Please enter 1 - %1"), pages) })
                                                 return
                                             end
                                             -- Override start page
                                             local original_pages_read = ch.pagesRead
                                             ch.pagesRead = page_num - 1
-                                            self:launchKavitaChapterViewer(ch, self.catalog_title or self.current_server_name, true)
+                                            self:launchKavitaChapterViewer(ch,
+                                                self.catalog_title or self.current_server_name, true)
                                             ch.pagesRead = original_pages_read
                                         end,
                                     },
@@ -2067,7 +2096,7 @@ function KavitaBrowser:onMenuHold(item)
         end
 
         -- Add "Mark as read" option
-        table.insert(buttons, {})  -- separator
+        table.insert(buttons, {}) -- separator
         table.insert(buttons, {
             {
                 text = "\u{2713} " .. _("Mark as read"),
@@ -2077,13 +2106,13 @@ function KavitaBrowser:onMenuHold(item)
                     local progress = {
                         volumeId  = ch.volumeId,
                         chapterId = ch.id,
-                        pageNum   = pages,  -- i lost the thread on page numbers so lets overshoot
+                        pageNum   = pages, -- i lost the thread on page numbers so lets overshoot
                         seriesId  = self.current_series_id,
                         libraryId = self.current_series_library_id,
                     }
                     local code = KavitaClient:postReaderProgress(progress)
                     if code == 200 or code == 204 then
-                        UIManager:show(InfoMessage:new{ text = _("Marked as read") })
+                        UIManager:show(InfoMessage:new { text = _("Marked as read") })
                         -- Refresh the series view to update progress indicators
                         local sid = self.current_series_id
                         if sid then
@@ -2096,14 +2125,39 @@ function KavitaBrowser:onMenuHold(item)
                             end)
                         end
                     else
-                        UIManager:show(InfoMessage:new{ text = _("Failed to mark as read") })
+                        UIManager:show(InfoMessage:new { text = _("Failed to mark as read") })
                     end
                     UIManager:close(dialog)
                 end,
             },
         })
 
-        dialog = ButtonDialog:new{
+        -- Add "Download" option
+        if util.directoryExists(self.current_download_location) then
+            table.insert(buttons, {
+                {
+                    text = "\u{21D3} " .. _("Download Volume"),
+                    callback = function()
+                        UIManager:close(dialog)
+                        util.makePath(item.download_folder)
+
+                        local msg = InfoMessage:new { text = _("Downloading...") }
+                        UIManager:show(msg)
+
+                        local result = self:downloadChapters(item.download_folder, vol.chapters)
+                        UIManager:close(msg)
+
+                        if result then
+                            UIManager:show(InfoMessage:new { text = _("Volume successfully downloaded") })
+                        else
+                            UIManager:show(InfoMessage:new { text = _("Failed to download chapter") })
+                        end
+                    end,
+                },
+            })
+        end
+
+        dialog = ButtonDialog:new {
             title = item.text,
             title_align = "center",
             buttons = buttons,
@@ -2115,7 +2169,7 @@ function KavitaBrowser:onMenuHold(item)
     -- Handle server (root list) long-press for Edit/Delete
     if #self.paths > 0 then return true end -- not root list
     local dialog
-    dialog = ButtonDialog:new{
+    dialog = ButtonDialog:new {
         title = item.text,
         title_align = "center",
         buttons = {
@@ -2123,7 +2177,7 @@ function KavitaBrowser:onMenuHold(item)
                 {
                     text = _("Delete"),
                     callback = function()
-                        UIManager:show(ConfirmBox:new{
+                        UIManager:show(ConfirmBox:new {
                             text = _("Delete Kavita server?"),
                             ok_text = _("Delete"),
                             ok_callback = function()
@@ -2144,6 +2198,27 @@ function KavitaBrowser:onMenuHold(item)
         },
     }
     UIManager:show(dialog)
+    return true
+end
+
+function KavitaBrowser:downloadChapters(download_folder, chapters)
+    if not chapters then
+        return true
+    end
+    for __, chapter in ipairs(chapters) do
+        local __, fileName = util.splitFilePathName(chapter.files[1].filePath)
+        local download_location = download_folder .. "/" .. util.getSafeFilename(fileName)
+        if not util.fileExists(download_location) then
+            local code, headers, status, body_str = KavitaClient:downloadChapterById(chapter.id)
+            if not body_str or code ~= 200 then
+                return false
+            else
+                local file = assert(io.open(download_location, 'w'))
+                file:write(body_str)
+                file:close()
+            end
+        end
+    end
     return true
 end
 
