@@ -285,6 +285,34 @@ function KavitaBrowser:showTitleMenu()
     UIManager:show(dialog)
 end
 
+function KavitaBrowser:buildKavitaLibraryItems(libraries)
+    local items = {}
+    if type(libraries) == "table" then
+        for __, library in ipairs(libraries) do
+            local id = library.id
+            local name = library.name
+            local item = {
+                id = id,
+                text = name,
+                kavita_library = true,
+                library = library,
+            }
+
+            -- Library items are folders, not files
+            -- CoverBrowser needs a path even for directories
+            if self.has_coverbrowser then
+                item.is_file = false  -- Mark as directory
+                -- Provide a dummy directory path
+                item.path = string.format("/kavita/%s/library/%d/",
+                    self.current_server_name or "unknown", id)
+            end
+
+            table.insert(items, item)
+        end
+    end
+    return items
+end
+
 -- Build menu entries from the Kavita dashboard array
 function KavitaBrowser:buildKavitaDashboardItems(dashboard)
     local items = {}
@@ -357,16 +385,30 @@ function KavitaBrowser:showDashboardAfterSelection(server_name)
     UIManager:show(loading)
     UIManager:forceRePaint()
 
-    local data, code, __, status = KavitaClient:getDashboard()
+    local dashboard_data, dashboard_code, __, dashboard_status = KavitaClient:getDashboard()
+    local library_data, library_code, __, library_status = KavitaClient:getLibraries()
 
     UIManager:close(loading)
 
-    if not data then
-        self:handleCatalogError("dashboard", "/api/Stream/dashboard", status or code)
+    if (not dashboard_data) or (not library_data) then
+        if not dashboard_data then
+            self:handleCatalogError("dashboard", "/api/Stream/dashboard", dashboard_status or dashboard_code)
+        end
+        if not library_data then
+            self:handleCatalogError("libraries", "/api/Library/libraries", library_status or library_code)
+        end
         return
     end
 
-    local items = self:buildKavitaDashboardItems(data)
+    local dashboard_items = self:buildKavitaDashboardItems(dashboard_data)
+    local library_items = self:buildKavitaLibraryItems(library_data)
+    local items = {}
+    for __, item in ipairs(dashboard_items) do
+        table.insert(items, item)
+    end
+    for __, item in ipairs(library_items) do
+        table.insert(items, item)
+    end
     self.catalog_title = server_name
     self.search_url = nil
 
@@ -533,7 +575,7 @@ function KavitaBrowser:buildKavitaChapterItems(chapters, kind)
             local ch_prefix = c.number and ("Ch. " .. tostring(c.number)) or nil
             local base
 
-            if c.titleName and c.titleName ~= "" then
+            if c.format == 1 and c.titleName and c.titleName ~= "" then
                 local lower = c.titleName:lower()
                 if not (lower:find("ch") or lower:find("chap") or lower:find("chapter") or lower:find("vol") or lower:find("volume")) and ch_prefix then
                     base = ch_prefix .. ": " .. c.titleName
@@ -659,7 +701,11 @@ function KavitaBrowser:showSeriesDetail(series_name, series_id, library_id, opts
     -- Push a sentinel so back returns to the stream list (skip when refreshing)
     if not refresh_only then
         self.paths = self.paths or {}
-        table.insert(self.paths, { kavita_stream_root = self.current_stream_name, title = self.catalog_title })
+        if self.current_stream_name then
+            table.insert(self.paths, { kavita_stream_root = self.current_stream_name, title = self.catalog_title })
+        else
+            table.insert(self.paths, { kavita_library_root = self.current_library_id, title = self.catalog_title })
+        end
     end
 
     -- Pass -1 to maintain current page when refreshing, nil to reset to page 1
@@ -772,6 +818,7 @@ function KavitaBrowser:showKavitaStream(stream_name, stream_type, stream_title, 
 
     -- Remember current stream for back navigation from series detail
     self.current_stream_name = stream_name
+    self.current_library_id = nil
 
     -- Determine title from streamType or provided stream_title
     if not stream_title then
@@ -804,6 +851,110 @@ function KavitaBrowser:showKavitaStream(stream_name, stream_type, stream_title, 
             stream_type = stream_type,
             stream_title = stream_title,
             smart_filter_encoded = smart_filter_encoded,
+            title = self.catalog_title
+        })
+    end
+
+    self:switchItemTable(self.catalog_title, items, nil, nil, nil)
+    self:setTitleBarLeftIcon("appbar.menu")
+    self.onLeftButtonTap = function()
+        self:showTitleMenu()
+    end
+end
+
+-- Fetch a specific Kavita library and display series
+function KavitaBrowser:showKavitaLibrary(library_id, library_name)
+    local loading = InfoMessage:new { text = _("Loading..."), timeout = 0 }
+    UIManager:show(loading)
+    UIManager:forceRePaint()
+
+    -- Determine pagination strategy based on stream type
+    local max_pages = nil
+
+    -- Fetch all pages until we get less than page_size results or empty results
+    local all_data = {}
+    local page_num = 1
+    local page_size = 50
+    local has_more = true
+
+    while has_more do
+        local params = {
+            PageNumber = page_num,
+            PageSize = page_size,
+        }
+
+        local data, code, __, status = KavitaClient:getLibrarySeries(library_id, params)
+
+        if not data then
+            UIManager:close(loading)
+            self:handleCatalogError("library", "/api/Library/" .. tostring(library_id), status or code)
+            return
+        end
+
+        -- Append results to all_data
+        if type(data) == "table" and #data > 0 then
+            for _, item in ipairs(data) do
+                table.insert(all_data, item)
+            end
+
+            -- Check if we should continue fetching
+            if #data < page_size then
+                has_more = false
+            elseif max_pages and page_num >= max_pages then
+                has_more = false -- Reached max page limit
+            else
+                page_num = page_num + 1
+            end
+        else
+            has_more = false
+        end
+    end
+
+
+    UIManager:close(loading)
+
+    local data = all_data
+
+    -- Normalize response to a flat array of SeriesDto
+    local series_list = data
+    if type(data) == "table" and #data == 0 then
+        series_list = data.items or data.series or data.data or data.results or data.entries
+        if type(series_list) ~= "table" then
+            local tmp = {}
+            for _, v in pairs(data) do
+                if type(v) == "table" then
+                    if v.id and (v.name or v.localizedName or v.originalName) then
+                        table.insert(tmp, v)
+                    elseif type(v[1]) == "table" then
+                        for __, vv in ipairs(v) do
+                            if type(vv) == "table" and (vv.name or vv.localizedName or vv.originalName) then
+                                table.insert(tmp, vv)
+                            end
+                        end
+                    end
+                end
+            end
+            series_list = tmp
+        end
+    end
+
+    local items = self:buildKavitaSeriesItems(series_list or {})
+
+    -- Remember current library for back navigation from series detail
+    self.current_stream_name = nil
+    self.current_library_id = library_id
+
+    self.catalog_title = library_name
+    self.search_url = nil
+
+    -- Push library path so back returns to dashboard
+    self.paths = self.paths or {}
+
+    local top = self.paths[#self.paths]
+
+    if not (top and top.kavita_library_root == library_id) then
+        table.insert(self.paths, {
+            kavita_library_root = library_id,
             title = self.catalog_title
         })
     end
@@ -1120,6 +1271,8 @@ function KavitaBrowser:handleCatalogError(context, item_url, error_msg)
     local message
     if context == "dashboard" then
         message = _("Cannot load dashboard. Please check your connection.")
+    elseif context == "libraries" then
+        message = _("Cannot load libraries. Please check your connection.")
     elseif context == "search" then
         message = _("Search failed. Please try again.")
     elseif context == "series" then
@@ -1138,6 +1291,11 @@ end
 -- Launch the Kavita chapter viewer using Reader/image endpoint
 function KavitaBrowser:launchKavitaChapterViewer(chapter, series_name, is_volume, override_view_mode)
     if not chapter or not chapter.id then return end
+
+    if chapter.format ~= 1 then
+        UIManager:show(InfoMessage:new{ text = "The chapter's file type is not supported." })
+        return
+    end
 
     local pages = chapter.pages or (chapter.files and #chapter.files) or 0
     if pages <= 0 then
@@ -1417,7 +1575,7 @@ function KavitaBrowser:onMenuSelect(item)
     if item.kavita_dashboard then
         local stream_name = item.kavita_stream_name or (item.dashboard and item.dashboard.name)
         if not stream_name or stream_name == "" then
-            UIManager:show(InfoMessage:new{ text = _("Invalid dashboard item") })
+            UIManager:show(InfoMessage:new { text = _("Invalid dashboard item") })
             return true
         end
 
@@ -1428,6 +1586,11 @@ function KavitaBrowser:onMenuSelect(item)
             item.dashboard and item.dashboard.smartFilterEncoded
         )
 
+        return true
+    end
+
+    if item.kavita_library then
+        self:showKavitaLibrary(item.id, item.text)
         return true
     end
 
@@ -2062,6 +2225,8 @@ function KavitaBrowser:onReturn()
                 path.stream_title,
                 path.smart_filter_encoded
             )
+        elseif path.kavita_library_root then
+            self:showKavitaLibrary(path.kavita_library_root, path.title)
         elseif path.kavita_dashboard_root then
             -- return to dashboard for current server
             self:showDashboardAfterSelection(self.current_server_name or self.catalog_title)

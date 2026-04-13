@@ -365,6 +365,13 @@ function KavitaClient:getDashboard()
     }, 300, "kavita|dashboard")
 end
 
+-- Dashboard: GET /api/Library/libraries (cached)
+function KavitaClient:getLibraries()
+    return self:apiJSONCached("/api/Library/libraries", {
+        method = "GET",
+    }, 300, "kavita|libraries")
+end
+
 -- Fetch a Series by id: GET /api/Series/{seriesId}
 -- Returns: seriesDto_tbl, code, headers, status, raw_body
 function KavitaClient:getSeriesById(seriesId)
@@ -394,6 +401,44 @@ function KavitaClient:decodeFilter(encodedFilter)
     })
 
     return data, code, headers, status, body
+end
+
+-- Fetch a library's series by id.
+-- Uses POST /api/Series/... for known dashboard streams, or decodes and uses smart filters.
+-- Returns: array_of_SeriesDto, code, headers, status, raw_body
+function KavitaClient:getLibrarySeries(id, params)
+    if not id then
+        logger.warn("KavitaClient:getLibrarySeries: id is required")
+        return nil, nil, nil, "id required", nil
+    end
+
+    local query = {}
+
+    -- Extract known paging params if provided
+    if type(params) == "table" then
+        query.PageNumber = params.PageNumber or params.page or params.pageNumber
+        query.PageSize   = params.PageSize   or params.page_size or params.pageSize
+    end
+
+    local data, code, headers, status, body_str = self:apiJSONCached("/api/Series/all-v2", {
+        method = "POST",
+        query  = query,
+        body = {
+            id = 0,
+            name = nil,
+            statements = {
+                { comparison = 5, field = 19, value = tostring(id) }
+            },
+            combination = 1,  -- AND
+            limitTo = 0,
+            sortOptions = {
+                isAscending = true,
+                sortField = 1,  -- Recently updated sort
+            },
+        },
+    }, 120, "kavita|library")
+
+    return data, code, headers, status, body_str
 end
 
 -- Fetch a stream's series by name.
