@@ -1053,7 +1053,7 @@ function KavitaBrowser:genItemTableFromRoot()
 end
 
 -- Shows dialog to edit properties of the new/existing catalog
-function KavitaBrowser:addEditServer(item, is_edit)
+function KavitaBrowser:addEditServer(item, is_edit, opts)
     if is_edit == nil then is_edit = item ~= nil end
     local fields = {
         {
@@ -1079,6 +1079,20 @@ function KavitaBrowser:addEditServer(item, is_edit)
         fields[4].text = item.download_location
     else
         title = _("Add Kavita server")
+    end
+    if opts then
+        if opts.text then
+            fields[1].text = opts.text
+        end
+        if opts.url then
+            fields[2].text = opts.url
+        end
+        if opts.api_key then
+            fields[3].text = opts.api_key
+        end
+        if opts.download_location then
+            fields[4].text = opts.download_location
+        end
     end
 
     local button_text = is_edit and _("Save") or _("Add")
@@ -1106,7 +1120,15 @@ function KavitaBrowser:addEditServer(item, is_edit)
 
                         require("ui/downloadmgr"):new{
                             onConfirm = function(folder)
-                                fields[4].text = folder
+                                UIManager:nextTick(function()
+                                    UIManager:close(dialog)
+                                    self:addEditServer(item, is_edit, {
+                                        text = fields[1].text,
+                                        url = fields[2].text,
+                                        api_key = fields[3].text,
+                                        download_location = folder,
+                                    })
+                                end)
                             end,
                         }:chooseDir(force_chooser_dir)
                     end,
