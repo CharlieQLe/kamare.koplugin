@@ -2231,14 +2231,21 @@ function KavitaBrowser:downloadChapters(download_folder, chapters)
         local __, fileName = util.splitFilePathName(chapter.files[1].filePath)
         local download_location = download_folder .. "/" .. util.getSafeFilename(fileName)
         if not util.fileExists(download_location) then
+            local dialog = InfoMessage:new{ text = "Downloading file " .. fileName }
+            UIManager:show(dialog)
+            UIManager:forceRePaint()
             local code, headers, status, body_str = KavitaClient:downloadChapterById(chapter.id)
             if not body_str or code ~= 200 then
+                UIManager:close(dialog)
+                UIManager:forceRePaint()
                 return false
             else
                 local file = assert(io.open(download_location, 'w'))
                 file:write(body_str)
                 file:close()
             end
+            UIManager:close(dialog)
+            UIManager:forceRePaint()
         end
     end
     return true
