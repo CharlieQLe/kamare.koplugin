@@ -1962,9 +1962,6 @@ function KavitaBrowser:onMenuHold(item)
                             return nil
                         end
 
-                        local msg = InfoMessage:new { text = _("Downloading...") }
-                        UIManager:show(msg)
-
                         local chapter_result = self:downloadChapters(item.download_folder, detail.chapters)
                         local special_result = self:downloadChapters(item.download_folder, detail.specials)
                         local volume_result
@@ -1978,7 +1975,6 @@ function KavitaBrowser:onMenuHold(item)
                                 end
                             end
                         end
-                        UIManager:close(msg)
 
                         if chapter_result and special_result and volume_result then
                             UIManager:show(InfoMessage:new { text = _("Series successfully downloaded") })
